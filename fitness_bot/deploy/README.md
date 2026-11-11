@@ -84,14 +84,53 @@ ollama pull bge-m3
 /opt/fitness_bot/venv/bin/python /opt/fitness_bot/scripts/index_rag.py
 ```
 
-## Обновления
+## Обновление
+
+На сервере уже настроены:
+- `/opt/fitness_src` — git-клон репозитория;
+- `/usr/local/bin/fitbot-update` — скрипт обновления.
+
+Порядок:
 
 ```bash
-cd /opt/fitnes && sudo git pull
-sudo rsync -a --exclude .env --exclude fitness.db --exclude venv \
-    /opt/fitnes/fitness_bot/ /opt/fitness_bot/
-sudo systemctl restart fitness-bot
+# 1. Локально: закоммитить и запушить
+git add .
+git commit -m "..."
+git push origin main
+
+# 2. На сервере
+ssh root@SERVER
+fitbot-update
 ```
+
+Скрипт делает `git pull` в `/opt/fitness_src`, переносит код в `/opt/fitness_bot`
+через `rsync` (не трогая `.env`, `fitness.db`, `data/books` и
+`data/knowledge/books`), пересобирает образ и перезапускает контейнер.
+
+Вручную то же самое:
+
+```bash
+cd /opt/fitness_src && git pull --ff-only
+rsync -a --delete \
+  --exclude '.env' --exclude 'fitness.db' --exclude '*.log' \
+  --exclude '__pycache__' --exclude '.vendor' \
+  --exclude 'data/books' --exclude 'data/knowledge/books' \
+  /opt/fitness_src/fitness_bot/ /opt/fitness_bot/
+cd /opt/fitness_bot && docker compose up -d --build
+```
+
+Миграции схемы выполняются сами при старте (`init_db` создаёт недостающие таблицы).
+
+Откат на предыдущий коммит:
+
+```bash
+cd /opt/fitness_src
+git log --oneline -5
+git reset --hard <sha>
+fitbot-update   # или повторить rsync + docker compose up -d --build
+```
+
+База перед обновлением не перезаписывается; резервные копии лежат в `/root/backups`.
 
 ## Бэкап базы
 
