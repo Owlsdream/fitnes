@@ -1,0 +1,13 @@
+.git
+.gitignore
+.env
+fitness.db
+bot.log
+*.log
+__pycache__/
+*.pyc
+.vendor/
+venv/
+data/books/*
+!data/books/.gitkeep
+data/knowledge/books/

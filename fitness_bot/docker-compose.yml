@@ -1,0 +1,17 @@
+services:
+  bot:
+    build: .
+    container_name: fitness-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # история тренировок живёт на хосте, чтобы переживать пересборку образа
+      - ./fitness.db:/app/fitness.db
+      - ./data/books:/app/data/books
+      - ./data/knowledge/books:/app/data/knowledge/books
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

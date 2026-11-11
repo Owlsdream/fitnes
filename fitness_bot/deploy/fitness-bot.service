@@ -1,0 +1,20 @@
+[Unit]
+Description=Fitness Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fitbot
+Group=fitbot
+WorkingDirectory=/opt/fitness_bot
+ExecStart=/opt/fitness_bot/venv/bin/python -u bot.py
+Restart=always
+RestartSec=5
+# .env читает сам бот через python-dotenv, поэтому EnvironmentFile не нужен
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fitness-bot
+
+[Install]
+WantedBy=multi-user.target
