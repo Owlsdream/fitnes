@@ -1,4 +1,6 @@
-# handlers/program.py — просмотр программы и импорт через ИИ (Этап 8)
+# handlers/program.py — просмотр программы, план на месяц и импорт через ИИ (Этап 8)
+from datetime import datetime
+
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery
@@ -9,26 +11,88 @@ from states import Import
 
 router = Router()
 
+WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+
+def _short_date(iso: str) -> str:
+    d = datetime.strptime(iso, "%Y-%m-%d")
+    return f"{WEEKDAYS[d.weekday()]} {d.strftime('%d.%m')}"
+
 
 @router.callback_query(F.data == "menu:program")
 async def show_program(callback: CallbackQuery) -> None:
-    """Кнопка «🏋️ Моя программа» — показывает текущую программу по дням."""
-    program = await db.get_current_program(callback.from_user.id)
+    """Программа и календарь: что пройдено, а что ещё предстоит."""
+    user_id = callback.from_user.id
+    program = await db.get_current_program(user_id)
     if not program:
         await callback.message.answer("Программы ещё нет. Нажми /start и пройди опрос.")
         await callback.answer()
         return
-    days = await db.get_days(program["id"])
-    lines = [f"📋 {program['name']} (источник: {program['source']})"]
-    for day in days:
-        exs = await db.get_day_exercises(day["id"])
-        lines.append(f"\n📅 {day['day_name']} — {day['focus']}")
-        for e in exs:
-            name = e["real_name"] or e["custom_name"]
-            lines.append(f"  • {name}: {e['sets']}×{e['reps_min']}-{e['reps_max']}, "
-                         f"отдых {e['rest_seconds']}с"
-                         + (f", цель {e['target_weight']} кг" if e.get("target_weight") else ""))
-    await callback.message.answer("\n".join(lines))
+
+    sched = await db.get_schedule(user_id)
+    if not sched:
+        user = await db.get_user(user_id)
+        if user:
+            from services.program_builder import schedule_program
+            await schedule_program(user, program["id"])
+            sched = await db.get_schedule(user_id)
+    done = [s for s in sched if s["status"] == "done"]
+    pending = [s for s in sched if s["status"] == "pending"]
+    goals = await db.get_goals(program["id"])
+    block = await db.latest_plan(user_id, "block")
+
+    lines = [f"📋 {program['name']}",
+             f"✅ Пройдено: {len(done)} · 🔜 Осталось: {len(pending)}"]
+    if goals:
+        lines.append("🎯 " + ", ".join(
+            f"{g['exercise']} {g['start_weight']:g}→{g['target_weight']:g} кг" for g in goals))
+    if block:
+        lines.append("\n" + block["markdown_text"])
+    if pending:
+        lines.append("\n🔜 Непройденные тренировки:")
+        for s in pending[:10]:
+            lines.append(f"  • {_short_date(s['planned_date'])} — {s['day_name']} ({s['focus']})")
+        if len(pending) > 10:
+            lines.append(f"  … и ещё {len(pending) - 10}")
+    if done:
+        lines.append("\n✔️ Завершённые:")
+        for s in done[-5:]:
+            d = datetime.strptime(s["planned_date"], "%Y-%m-%d")
+            lines.append(f"  • {d.strftime('%d.%m.%Y')} — {s['day_name']}")
+    if not sched:
+        lines.append("\nКалендарь ещё не создан — нажми «▶️ Начать тренировку».")
+
+    await callback.message.answer("\n".join(lines),
+                                  reply_markup=kb.new_month_kb if not pending else kb.rebuild_kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data.in_({"prog:new", "prog:new_yes"}))
+async def new_month(callback: CallbackQuery, state: FSMContext) -> None:
+    """Закрывает незавершённые тренировки и генерирует новый месяц."""
+    user_id = callback.from_user.id
+    user = await db.get_user(user_id)
+    if not user or not user.get("gender"):
+        await callback.message.answer("Сначала пройди /start и заполни профиль.")
+        await callback.answer()
+        return
+
+    counts = await db.count_scheduled(user_id)
+    if counts.get("pending", 0) and callback.data == "prog:new":
+        await callback.message.answer(
+            "Пересобрать программу? Текущий план на месяц будет заменён.",
+            reply_markup=kb.confirm_rebuild_kb)
+        await callback.answer()
+        return
+
+    from services.program_builder import generate_program, schedule_program
+    await callback.message.answer("⏳ Собираю новую программу по истории тренировок…")
+    await generate_program(user)
+    program = await db.get_current_program(user_id)
+    planned = await schedule_program(user, program["id"]) if program else 0
+    await callback.message.answer(f"🆕 Новая программа на 2 месяца: {planned} тренировок.")
+    from handlers.workout import begin_workout
+    await begin_workout(callback.message, user_id, state)
     await callback.answer()
 
 

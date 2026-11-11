@@ -2,3 +2,10 @@
 fitness.db
 __pycache__/
 *.pyc
+# исходники книг и выжатые из них фрагменты (копирайт — только локально)
+data/books/*
+!data/books/.gitkeep
+data/knowledge/books/
+*.log
+# локально установленные бинарные зависимости (PyMuPDF)
+.vendor/

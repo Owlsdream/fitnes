@@ -10,20 +10,51 @@ import keyboards as kb
 import database as db
 from states import Workout
 from services.progression import suggest_weight
+from services.program_builder import schedule_program
 
 router = Router()
 
+WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+
+def _fmt_date(iso: str) -> str:
+    d = datetime.strptime(iso, "%Y-%m-%d")
+    return f"{WEEKDAYS[d.weekday()]}, {d.strftime('%d.%m.%Y')}"
+
 
 async def begin_workout(message: Message, user_id: int, state: FSMContext) -> None:
-    """Выбор дня программы и старт тренировки."""
+    """Показывает ближайшую непройденную тренировку из плана на месяц."""
     program = await db.get_current_program(user_id)
     if not program:
         await message.answer("Сначала пройди /start и получи программу.")
         return
-    days = await db.get_days(program["id"])
-    rows = [[InlineKeyboardButton(text=f"{d['day_name']} — {d['focus']}",
-                                  callback_data=f"wk:day:{d['id']}")] for d in days]
-    await message.answer("Какой день тренируем?", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+    # программы, созданные до появления календаря, получают план автоматически
+    if not await db.has_schedule(user_id):
+        user = await db.get_user(user_id)
+        if user:
+            await schedule_program(user, program["id"])
+
+    sched = await db.get_next_scheduled(user_id)
+    if not sched:
+        counts = await db.count_scheduled(user_id)
+        if counts.get("done", 0):
+            await message.answer(
+                f"🎉 Все тренировки плана закрыты ({counts['done']} шт.).\n"
+                "Сгенерировать новый план на месяц?",
+                reply_markup=kb.new_month_kb)
+        else:
+            await message.answer("В плане нет тренировок. Нажми /start и пройди опрос.")
+        return
+
+    counts = await db.count_scheduled(user_id)
+    total = sum(counts.values())
+    done = counts.get("done", 0)
+    await message.answer(
+        f"📅 Следующая тренировка: <b>{sched['day_name']}</b> — {sched['focus']}\n"
+        f"{_fmt_date(sched['planned_date'])}\n"
+        f"Пройдено {done} из {total}.\n\nНачинаем?",
+        reply_markup=kb.start_workout_kb(sched["id"]))
 
 
 @router.message(Command("workout"))
@@ -31,23 +62,41 @@ async def cmd_workout(message: Message, state: FSMContext) -> None:
     await begin_workout(message, message.from_user.id, state)
 
 
-@router.callback_query(F.data.startswith("wk:day:"))
-async def pick_day(callback: CallbackQuery, state: FSMContext) -> None:
-    day_id = int(callback.data.split(":")[2])
+@router.callback_query(F.data.startswith("wk:start:"))
+async def start_scheduled(callback: CallbackQuery, state: FSMContext) -> None:
+    """Запуск конкретной запланированной тренировки."""
+    scheduled_id = int(callback.data.split(":")[2])
+    sched = await db.get_scheduled(scheduled_id)
     user_id = callback.from_user.id
-    program = await db.get_current_program(user_id)
-    exercises = await db.get_day_exercises(day_id)
-    if not exercises:
-        await callback.message.answer("В этом дне нет упражнений.")
-        await callback.answer()
+    if not sched or sched["user_id"] != user_id or sched["status"] != "pending":
+        await callback.answer("Эта тренировка уже неактуальна.", show_alert=True)
         return
 
-    workout_id = await db.start_workout(user_id, program["id"] if program else None, day_id)
+    exercises = await db.get_day_exercises(sched["day_id"])
+    if not exercises:
+        await callback.answer("В этом дне нет упражнений.", show_alert=True)
+        return
+
+    workout_id = await db.start_workout(user_id, sched["program_id"], sched["day_id"])
     await state.set_state(Workout.logging)
-    await state.update_data(workout_id=workout_id, day_id=day_id, started_at=datetime.now(),
+    await state.update_data(workout_id=workout_id, day_id=sched["day_id"],
+                            scheduled_id=scheduled_id, started_at=datetime.now(),
                             tonnage=0.0, ex_index=0, set_index=0)
-    await callback.message.answer("🏋️ Тренировка начата! Поехали.")
+    await callback.message.edit_text(f"🏋️ {sched['day_name']} — {sched['focus']}. Поехали!")
     await _show_current_exercise(callback.message, user_id, state)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("wk:skipday:"))
+async def skip_scheduled(callback: CallbackQuery, state: FSMContext) -> None:
+    scheduled_id = int(callback.data.split(":")[2])
+    sched = await db.get_scheduled(scheduled_id)
+    if not sched or sched["user_id"] != callback.from_user.id or sched["status"] != "pending":
+        await callback.answer("Эта тренировка уже неактуальна.", show_alert=True)
+        return
+    await db.complete_scheduled(scheduled_id, None, "skipped")
+    await callback.message.edit_text(f"⏭ Пропущено: {sched['day_name']} ({_fmt_date(sched['planned_date'])})")
+    await begin_workout(callback.message, callback.from_user.id, state)
     await callback.answer()
 
 
@@ -181,12 +230,14 @@ async def _finish_prompt(msg: Message, state: FSMContext) -> None:
 
 @router.callback_query(Workout.rpe, F.data.startswith("wk:rpe:"))
 async def finish_with_rpe(callback: CallbackQuery, state: FSMContext) -> None:
-    rpe = int(callback.data.split(":")[1])
+    rpe = int(callback.data.split(":")[2])
     data = await state.get_data()
     started = datetime.fromisoformat(str(data["started_at"]))
     duration = max(1, int((datetime.now() - started).total_seconds() // 60))
     tonnage = data.get("tonnage", 0.0)
     await db.finish_workout(data["workout_id"], duration, tonnage, rpe)
+    if data.get("scheduled_id"):
+        await db.complete_scheduled(data["scheduled_id"], data["workout_id"])
     await state.clear()
 
     # Сводка и сравнение с предыдущей тренировкой
@@ -198,12 +249,16 @@ async def finish_with_rpe(callback: CallbackQuery, state: FSMContext) -> None:
             delta = (tonnage - prev) / prev * 100
             delta_txt = f"\n📈 Изменение к прошлой тренировке: {delta:+.1f}%"
     pr = await _personal_record(callback.from_user.id, data)
+    counts = await db.count_scheduled(callback.from_user.id)
+    pending = counts.get("pending", 0)
+    tail = (f"\n\n📅 Осталось тренировок в плане: {pending}" if pending
+            else "\n\n🎉 План месяца закрыт! Можно сгенерировать новый.")
     await callback.message.edit_text(
         f"🏁 Тренировка завершена!\n"
         f"⏱ Длительность: {duration} мин\n"
         f"🏋️ Общий тоннаж: {tonnage:.0f} кг{delta_txt}\n"
-        f"💭 RPE: {rpe}/10\n{pr}",
-        reply_markup=kb.main_menu,
+        f"💭 RPE: {rpe}/10\n{pr}{tail}",
+        reply_markup=kb.new_month_kb if pending == 0 else kb.main_menu,
     )
     await callback.answer()
 

@@ -12,7 +12,7 @@ from aiogram.types import BotCommand, ErrorEvent, Message
 import config
 import database as db
 from data.exercises import EXERCISES
-from handlers import onboarding, program, workout, stats
+from handlers import onboarding, program, workout, stats, plan
 from services.ai_agent import ask_for_user
 
 router_ai = Router()
@@ -61,6 +61,7 @@ async def main() -> None:
     dp.include_router(program.router)
     dp.include_router(workout.router)
     dp.include_router(stats.router)
+    dp.include_router(plan.router)
     dp.include_router(router_ai)
 
     # 4. Глобальный обработчик ошибок — бот не должен падать
@@ -73,6 +74,7 @@ async def main() -> None:
     await bot.set_my_commands([
         BotCommand(command="/start", description="Начать / главное меню"),
         BotCommand(command="/workout", description="Начать тренировку"),
+        BotCommand(command="/plan", description="План недели и ближайшего дня"),
         BotCommand(command="/import", description="Импортировать программу"),
         BotCommand(command="/ai", description="ИИ-разбор прогресса"),
     ])

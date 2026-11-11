@@ -6,6 +6,7 @@ main_menu = InlineKeyboardMarkup(inline_keyboard=[
      InlineKeyboardButton(text="▶️ Начать тренировку", callback_data="menu:start")],
     [InlineKeyboardButton(text="📊 Статистика", callback_data="menu:stats"),
      InlineKeyboardButton(text="⚙️ Профиль", callback_data="menu:profile")],
+    [InlineKeyboardButton(text="🗓 План недели", callback_data="menu:plan")],
 ])
 
 
@@ -43,3 +44,27 @@ confirm_import_kb = InlineKeyboardMarkup(inline_keyboard=[[
     InlineKeyboardButton(text="✅ Подтвердить", callback_data="imp:ok"),
     InlineKeyboardButton(text="✏️ Исправить", callback_data="imp:fix"),
 ]])
+
+
+def start_workout_kb(scheduled_id: int) -> InlineKeyboardMarkup:
+    """Кнопки под карточкой следующей запланированной тренировки."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="▶️ Начать", callback_data=f"wk:start:{scheduled_id}"),
+        InlineKeyboardButton(text="⏭ Пропустить", callback_data=f"wk:skipday:{scheduled_id}"),
+    ]])
+
+
+new_month_kb = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="🔄 Программа на следующий месяц", callback_data="prog:new")],
+    [InlineKeyboardButton(text="📋 Моя программа", callback_data="menu:program")],
+])
+
+rebuild_kb = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="🔄 Пересобрать программу (ИИ)", callback_data="prog:new")],
+    [InlineKeyboardButton(text="📋 Моя программа", callback_data="menu:program")],
+])
+
+confirm_rebuild_kb = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="✅ Да, пересобрать", callback_data="prog:new_yes")],
+    [InlineKeyboardButton(text="Отмена", callback_data="menu:program")],
+])

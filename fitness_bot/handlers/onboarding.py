@@ -69,7 +69,7 @@ async def start_from_menu(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(Onboarding.gender, F.data.startswith("ob:gender:"))
 async def ob_gender(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(gender=callback.data.split(":")[1])
+    await state.update_data(gender=callback.data.split(":")[2])
     await state.set_state(Onboarding.birth_year)
     await callback.message.edit_text("Шаг 2 из 10. Год рождения? (например, 1995)")
     await callback.answer()
@@ -125,7 +125,7 @@ async def ob_weight(message: Message, state: FSMContext) -> None:
 # ---------- Шаги 5–10: кнопочные ----------
 @router.callback_query(Onboarding.level, F.data.startswith("ob:level:"))
 async def ob_level(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(level=callback.data.split(":")[1])
+    await state.update_data(level=callback.data.split(":")[2])
     await state.set_state(Onboarding.goal)
     await callback.message.edit_text("Шаг 6 из 10. Твоя цель?", reply_markup=kb.goal_kb)
     await callback.answer()
@@ -133,7 +133,7 @@ async def ob_level(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(Onboarding.goal, F.data.startswith("ob:goal:"))
 async def ob_goal(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(goal=callback.data.split(":")[1])
+    await state.update_data(goal=callback.data.split(":")[2])
     await state.set_state(Onboarding.days)
     await callback.message.edit_text("Шаг 7 из 10. Сколько дней в неделю готов тренироваться?",
                                      reply_markup=kb.days_kb)
@@ -142,7 +142,7 @@ async def ob_goal(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(Onboarding.days, F.data.startswith("ob:days:"))
 async def ob_days(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(days_per_week=int(callback.data.split(":")[1]))
+    await state.update_data(days_per_week=int(callback.data.split(":")[2]))
     await state.set_state(Onboarding.minutes)
     await callback.message.edit_text("Шаг 8 из 10. Сколько минут на тренировку?",
                                      reply_markup=kb.minutes_kb)
@@ -151,7 +151,7 @@ async def ob_days(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(Onboarding.minutes, F.data.startswith("ob:min:"))
 async def ob_minutes(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(session_minutes=int(callback.data.split(":")[1]))
+    await state.update_data(session_minutes=int(callback.data.split(":")[2]))
     await state.set_state(Onboarding.limitations)
     await callback.message.edit_text("Шаг 9 из 10. Есть ограничения по здоровью?",
                                      reply_markup=kb.limits_kb)
@@ -160,7 +160,7 @@ async def ob_minutes(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(Onboarding.limitations, F.data.startswith("ob:lim:"))
 async def ob_limits(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(limitations=callback.data.split(":")[1])
+    await state.update_data(limitations=callback.data.split(":")[2])
     await state.set_state(Onboarding.zones)
     await callback.message.edit_text("Шаг 10 из 10. Приоритетные зоны?",
                                      reply_markup=kb.zones_kb)
@@ -169,17 +169,22 @@ async def ob_limits(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(Onboarding.zones, F.data.startswith("ob:zone:"))
 async def ob_zones(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(priority_zones=callback.data.split(":")[1])
+    await state.update_data(priority_zones=callback.data.split(":")[2])
     data = await state.get_data()
     await state.clear()
 
     # Сохраняем профиль
     await db.save_onboarding(callback.from_user.id, data)
 
-    # Генерируем программу
-    from services.program_builder import generate_program
+    # Генерируем программу и план на месяц
+    from services.program_builder import generate_program, schedule_program
     user = await db.get_user(callback.from_user.id)
+    await callback.message.answer("⏳ Собираю программу по твоему профилю и истории…")
     report = await generate_program(user)
+    program = await db.get_current_program(callback.from_user.id)
+    planned = await schedule_program(user, program["id"]) if program else 0
+    if planned:
+        report += f"\n\n📅 План на 2 месяца: {planned} тренировок."
     await callback.message.edit_text(report)
     await callback.message.answer("Что дальше?", reply_markup=kb.main_menu)
     await callback.answer()

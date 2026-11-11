@@ -8,10 +8,34 @@ BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN не задан. Создайте файл .env и укажите в нём BOT_TOKEN.")
 
-# Ключ ИИ (OpenAI или Kimi) — опционально, без него бот работает
-AI_API_KEY: str = os.getenv("AI_API_KEY", "")
-AI_PROVIDER: str = os.getenv("AI_PROVIDER", "openai")  # openai | kimi
-AI_MODEL: str = os.getenv("AI_MODEL", "gpt-4o-mini")
+# ---------- Чат-модель ----------
+AI_PROVIDER: str = (os.getenv("AI_PROVIDER", "openai") or "openai").lower()  # deepseek | openai | kimi | ollama
+
+_DEFAULT_BASE = {
+    "deepseek": "https://api.deepseek.com/v1",
+    "kimi": "https://api.moonshot.cn/v1",
+    "ollama": "http://localhost:11434/v1",
+    "openai": "",
+}
+_DEFAULT_MODEL = {
+    "deepseek": "deepseek-chat",
+    "kimi": "moonshot-v1-8k",
+    "ollama": "qwen2.5-coder:14b",
+    "openai": "gpt-4o-mini",
+}
+
+# ключ: для deepseek можно отдельно задать DEEPSEEK_API_KEY
+AI_API_KEY: str = os.getenv("AI_API_KEY", "") or (
+    os.getenv("DEEPSEEK_API_KEY", "") if AI_PROVIDER == "deepseek" else "")
+AI_MODEL: str = os.getenv("AI_MODEL", "") or _DEFAULT_MODEL.get(AI_PROVIDER, "gpt-4o-mini")
+# OpenAI-совместимый endpoint; для deepseek/kimi/ollama подставляется по умолчанию
+AI_BASE_URL: str = os.getenv("AI_BASE_URL", "") or _DEFAULT_BASE.get(AI_PROVIDER, "")
+
+# ---------- Эмбеддинги (векторный RAG) ----------
+# Живут отдельно от чат-модели: DeepSeek не отдаёт эмбеддинги, поэтому по умолчанию — локальный Ollama.
+EMBED_MODEL: str = os.getenv("EMBED_MODEL", "bge-m3")
+EMBED_BASE_URL: str = os.getenv("EMBED_BASE_URL", "http://localhost:11434/v1")
+EMBED_API_KEY: str = os.getenv("EMBED_API_KEY", "ollama")
 
 # Путь к файлу базы данных
 DB_PATH: str = os.getenv("DB_PATH", "fitness.db")

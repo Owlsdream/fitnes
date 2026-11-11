@@ -1,6 +1,6 @@
 # database.py — схема SQLite и асинхронные функции доступа к данным
 import aiosqlite
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
 from config import DB_PATH
@@ -100,6 +100,19 @@ CREATE TABLE IF NOT EXISTS sets (
     done_at     TEXT DEFAULT (datetime('now'))
 );
 
+-- План тренировок на месяц: что уже проведено, а что ещё предстоит
+CREATE TABLE IF NOT EXISTS scheduled_workouts (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id      INTEGER NOT NULL REFERENCES users(telegram_id),
+    program_id   INTEGER NOT NULL REFERENCES programs(id) ON DELETE CASCADE,
+    day_id       INTEGER NOT NULL REFERENCES workout_days(id) ON DELETE CASCADE,
+    planned_date TEXT NOT NULL,              -- YYYY-MM-DD
+    status       TEXT NOT NULL DEFAULT 'pending',  -- pending / done / skipped
+    workout_id   INTEGER REFERENCES workouts(id),
+    created_at   TEXT DEFAULT (datetime('now')),
+    UNIQUE(program_id, day_id, planned_date)
+);
+
 -- Метрики здоровья из Apple Health
 CREATE TABLE IF NOT EXISTS health_metrics (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -124,6 +137,30 @@ CREATE TABLE IF NOT EXISTS ai_recommendations (
     confidence  REAL,
     applied     INTEGER DEFAULT 0,
     valid       INTEGER DEFAULT 1          -- результат двойной валидации
+);
+
+-- Планы по горизонтам: месяц (программа) → неделя → день
+CREATE TABLE IF NOT EXISTS plans (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       INTEGER NOT NULL REFERENCES users(telegram_id),
+    scope         TEXT NOT NULL,             -- block | week | day (month — это program)
+    period_start  TEXT NOT NULL,             -- YYYY-MM-DD
+    period_end    TEXT NOT NULL,
+    parent_id     INTEGER REFERENCES plans(id),
+    markdown_text TEXT NOT NULL,
+    created_at    TEXT DEFAULT (datetime('now')),
+    UNIQUE(user_id, scope, period_start)
+);
+
+-- Целевые показатели программы на 2 месяца (основные движения)
+CREATE TABLE IF NOT EXISTS program_goals (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    program_id   INTEGER NOT NULL REFERENCES programs(id) ON DELETE CASCADE,
+    exercise     TEXT NOT NULL,
+    start_weight REAL,
+    target_weight REAL,
+    created_at   TEXT DEFAULT (datetime('now')),
+    UNIQUE(program_id, exercise)
 );
 """
 
@@ -203,15 +240,16 @@ async def add_day(program_id: int, day_name: str, day_order: int, focus: str) ->
 
 async def add_day_exercise(day_id: int, exercise_id: int | None, custom_name: str | None,
                            sets: int, reps_min: int, reps_max: int,
-                           rest_seconds: int, order_num: int, is_compound: bool) -> int:
+                           rest_seconds: int, order_num: int, is_compound: bool,
+                           target_weight: float | None = None) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             """INSERT INTO day_exercises
                (day_id, exercise_id, custom_name, sets, reps_min, reps_max,
-                rest_seconds, order_num, is_compound)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                rest_seconds, order_num, is_compound, target_weight)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (day_id, exercise_id, custom_name, sets, reps_min, reps_max,
-             rest_seconds, order_num, int(is_compound)),
+             rest_seconds, order_num, int(is_compound), target_weight),
         )
         await db.commit()
         return cur.lastrowid
@@ -346,3 +384,197 @@ async def get_health_latest(user_id: int, limit: int = 14) -> list[dict[str, Any
             "SELECT * FROM health_metrics WHERE user_id=? ORDER BY date DESC LIMIT ?",
             (user_id, limit))
         return [dict(r) for r in await cur.fetchall()]
+
+
+# ---------- План на месяц ----------
+async def create_schedule(user_id: int, program_id: int, day_ids: list[int],
+                          days_per_week: int, start: date, weeks: int = 4) -> int:
+    """Раскладывает дни программы по календарю на `weeks` недель.
+
+    Тренировки распределяются равномерно: первая — в день старта,
+    последняя — в последний день периода, между ними равные промежутки.
+    """
+    total = max(1, weeks * days_per_week)
+    span = weeks * 7
+    offsets = [round(i * (span - 1) / (total - 1)) if total > 1 else 0 for i in range(total)]
+    async with aiosqlite.connect(DB_PATH) as db:
+        # новый план заменяет прежний календарь (сами тренировки остаются в истории)
+        await db.execute("DELETE FROM scheduled_workouts WHERE user_id=?", (user_id,))
+        # планы недели/дня устаревают; план блока (2 месяца) живёт до пересборки программы
+        await db.execute("DELETE FROM plans WHERE user_id=? AND scope IN ('week','day')", (user_id,))
+        await db.executemany(
+            """INSERT OR IGNORE INTO scheduled_workouts
+               (user_id, program_id, day_id, planned_date)
+               VALUES (?, ?, ?, ?)""",
+            [(user_id, program_id, day_ids[i % len(day_ids)],
+              (start + timedelta(days=offsets[i])).isoformat()) for i in range(total)])
+        await db.commit()
+    return total
+
+
+async def has_schedule(user_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT 1 FROM scheduled_workouts WHERE user_id=? LIMIT 1", (user_id,))
+        return await cur.fetchone() is not None
+
+
+async def get_schedule(user_id: int, status: str | None = None) -> list[dict[str, Any]]:
+    """Все запланированные тренировки пользователя с названием дня программы."""
+    sql = """SELECT s.*, d.day_name, d.focus, d.day_order
+             FROM scheduled_workouts s JOIN workout_days d ON d.id = s.day_id
+             WHERE s.user_id=?"""
+    params: list[Any] = [user_id]
+    if status:
+        sql += " AND s.status=?"
+        params.append(status)
+    sql += " ORDER BY s.planned_date, s.id"
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(sql, tuple(params))
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_next_scheduled(user_id: int) -> Optional[dict[str, Any]]:
+    """Ближайшая непройденная тренировка (просроченные идут первыми)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """SELECT s.*, d.day_name, d.focus, d.day_order, p.name AS program_name
+               FROM scheduled_workouts s
+               JOIN workout_days d ON d.id = s.day_id
+               JOIN programs p ON p.id = s.program_id
+               WHERE s.user_id=? AND s.status='pending'
+               ORDER BY s.planned_date, s.id LIMIT 1""", (user_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def get_scheduled(scheduled_id: int) -> Optional[dict[str, Any]]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """SELECT s.*, d.day_name, d.focus, p.name AS program_name
+               FROM scheduled_workouts s
+               JOIN workout_days d ON d.id = s.day_id
+               JOIN programs p ON p.id = s.program_id
+               WHERE s.id=?""", (scheduled_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def complete_scheduled(scheduled_id: int, workout_id: int | None = None,
+                             status: str = "done") -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE scheduled_workouts SET status=?, workout_id=COALESCE(?, workout_id) WHERE id=?",
+            (status, workout_id, scheduled_id))
+        await db.commit()
+
+
+async def count_scheduled(user_id: int) -> dict[str, int]:
+    """Счётчики по статусам: pending / done / skipped."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT status, COUNT(*) FROM scheduled_workouts WHERE user_id=? GROUP BY status",
+            (user_id,))
+        return {status: n for status, n in await cur.fetchall()}
+
+
+# ---------- Планы по горизонтам (week / day) ----------
+async def save_plan(user_id: int, scope: str, period_start: str, period_end: str,
+                    text: str, parent_id: int | None = None) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO plans (user_id, scope, period_start, period_end, parent_id, markdown_text)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(user_id, scope, period_start) DO UPDATE SET
+                 period_end=excluded.period_end,
+                 parent_id=excluded.parent_id,
+                 markdown_text=excluded.markdown_text,
+                 created_at=datetime('now')""",
+            (user_id, scope, period_start, period_end, parent_id, text))
+        await db.commit()
+        cur = await db.execute(
+            "SELECT id FROM plans WHERE user_id=? AND scope=? AND period_start=?",
+            (user_id, scope, period_start))
+        row = await cur.fetchone()
+        return int(row[0]) if row else 0
+
+
+async def get_plan(user_id: int, scope: str, period_start: str) -> Optional[dict[str, Any]]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM plans WHERE user_id=? AND scope=? AND period_start=?",
+            (user_id, scope, period_start))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+# ---------- Прогресс по упражнениям (для генерации весов) ----------
+async def exercise_progress(user_id: int, limit: int = 60) -> list[dict[str, Any]]:
+    """Лучший и последний вес/повторы по упражнению — база для прогрессии."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """WITH ranked AS (
+                   SELECT s.exercise_name AS name, s.weight_kg, s.reps, s.done_at,
+                          ROW_NUMBER() OVER (PARTITION BY s.exercise_name
+                                             ORDER BY s.done_at DESC, s.id DESC) AS rn_last,
+                          ROW_NUMBER() OVER (PARTITION BY s.exercise_name
+                                             ORDER BY s.weight_kg DESC, s.reps DESC) AS rn_best
+                   FROM sets s JOIN workouts w ON w.id = s.workout_id
+                   WHERE w.user_id=? AND s.skipped=0
+               )
+               SELECT name,
+                      MAX(weight_kg) AS best_weight,
+                      MAX(CASE WHEN rn_best=1 THEN reps END) AS best_reps,
+                      MAX(CASE WHEN rn_last=1 THEN weight_kg END) AS last_weight,
+                      MAX(CASE WHEN rn_last=1 THEN reps END) AS last_reps,
+                      MAX(CASE WHEN done_at >= date('now','-180 day')
+                               THEN weight_kg*(1.0+reps/30.0) END) AS recent_e1rm,
+                      COUNT(*) AS sets,
+                      MAX(done_at) AS last_date
+               FROM ranked GROUP BY name
+               ORDER BY last_date DESC LIMIT ?""",
+            (user_id, limit))
+        return [dict(r) for r in await cur.fetchall()]
+
+
+# ---------- Цели программы на 2 месяца ----------
+async def save_goals(program_id: int, goals: list[dict[str, Any]]) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executemany(
+            """INSERT INTO program_goals (program_id, exercise, start_weight, target_weight)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(program_id, exercise) DO UPDATE SET
+                 start_weight=excluded.start_weight,
+                 target_weight=excluded.target_weight""",
+            [(program_id, g["exercise"], g.get("start_weight"), g.get("target_weight"))
+             for g in goals])
+        await db.commit()
+
+
+async def get_goals(program_id: int) -> list[dict[str, Any]]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM program_goals WHERE program_id=? ORDER BY id", (program_id,))
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def latest_plan(user_id: int, scope: str) -> Optional[dict[str, Any]]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM plans WHERE user_id=? AND scope=? ORDER BY period_start DESC LIMIT 1",
+            (user_id, scope))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def delete_plans(user_id: int, scope: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM plans WHERE user_id=? AND scope=?", (user_id, scope))
+        await db.commit()
