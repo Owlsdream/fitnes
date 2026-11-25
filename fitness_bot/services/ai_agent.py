@@ -251,7 +251,7 @@ async def build_program_context(user: dict[str, Any]) -> dict[str, Any]:
     technique_query = "приседания жим лёжа становая тяга пауэрлифтинг техника"
     knowledge: list[dict] = []
     seen_titles: set[str] = set()
-    for q, k in ((query, 4), (technique_query, 2)):
+    for q, k in ((query, 4), (technique_query, 3)):
         for hit in await _retrieve_knowledge(q, k):
             key = hit.get("title") or hit.get("text", "")[:80]
             if key in seen_titles:
