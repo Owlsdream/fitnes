@@ -247,7 +247,17 @@ async def build_program_context(user: dict[str, Any]) -> dict[str, Any]:
     }.get(profile.get("goal") or "", "")
     query = (f"{goal_words} {profile.get('level')} объём подходы повторения разгрузка "
              f"восстановление {profile.get('limitations')} {profile.get('priority_zones')}")
-    knowledge = await _retrieve_knowledge(query, k=4)
+    # второй запрос — техника/пауэрлифтинг, чтобы в контекст попадали книги, а не только методички
+    technique_query = "приседания жим лёжа становая тяга пауэрлифтинг техника"
+    knowledge: list[dict] = []
+    seen_titles: set[str] = set()
+    for q, k in ((query, 4), (technique_query, 2)):
+        for hit in await _retrieve_knowledge(q, k):
+            key = hit.get("title") or hit.get("text", "")[:80]
+            if key in seen_titles:
+                continue
+            seen_titles.add(key)
+            knowledge.append(hit)
     return {
         "profile": profile,
         "volume": volume,
